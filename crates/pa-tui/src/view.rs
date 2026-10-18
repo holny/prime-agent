@@ -392,6 +392,9 @@ impl AgentView {
         text: &str,
         kind: crate::chat::StatusKind,
     ) -> bool {
+        if !matches!(self.chat.get(index), Some(ChatEntry::Status { .. })) {
+            return false;
+        }
         self.prepare_entry_mutation(index);
         let Some(ChatEntry::Status {
             text: slot,

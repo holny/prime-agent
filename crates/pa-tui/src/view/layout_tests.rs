@@ -456,6 +456,29 @@ fn mutation_invalidates_every_detail_slot() {
 }
 
 #[test]
+fn update_status_row_out_of_range_returns_false_without_panic() {
+    let mut view = view();
+    view.push_entry(ChatEntry::Status {
+        text: "old".into(),
+        kind: StatusKind::Info,
+    });
+    // Render once so the sparse window is tail-anchored (the panic path
+    // only fires when prepare_entry_mutation actually runs count_entry_rows).
+    view.render_frame(80, 24);
+    // Out-of-range index must be rejected by the guard, not panic.
+    assert!(!view.update_status_row(1, "new", StatusKind::Warning));
+    // In-range non-status entry is likewise rejected (contract).
+    view.push_entry(ChatEntry::Status {
+        text: "other".into(),
+        kind: StatusKind::Info,
+    });
+    view.render_frame(80, 24);
+    // The original entry at index 0 is a status row, so the guard passes;
+    // an index past the end still returns false.
+    assert!(!view.update_status_row(view.chat_len(), "new", StatusKind::Warning));
+}
+
+#[test]
 fn cold_paused_detail_uses_counts_not_offscreen_lines_for_supported_entries() {
     let mut view = view();
     for index in 0..100_000 {
