@@ -3979,6 +3979,102 @@ class FactoryExecutorTest(_ExecutorTestCase):
         )
 
     @async_test
+    async def test_foreach_json_output_binds_every_instance_value(self) -> None:
+        # A foreach state's json output binds the LIST of its instances'
+        # values, one value per instance. The instances answer in separate
+        # documents, so the entry's joined answer carries one fenced block
+        # per instance: parsing that binds ONE instance's value (the last
+        # block carrying the port) and drops the others with no error.
+        self.host.outcomes["src"] = {
+            "status": "done",
+            "answer": '```json\n{"items": ["a", "b", "c"]}\n```',
+        }
+        # src is child-1; the three fan instances are child-2..child-4.
+        self.host.child_outcomes["child-2"] = {
+            "status": "done",
+            "answer": '```json\n{"result": 1}\n```',
+        }
+        self.host.child_outcomes["child-3"] = {
+            "status": "done",
+            "answer": '```json\n{"result": 2}\n```',
+        }
+        self.host.child_outcomes["child-4"] = {
+            "status": "done",
+            "answer": '```json\n{"result": 3}\n```',
+        }
+        self.store_factory(
+            {
+                "run": {"failure_policy": "continue", "max_parallel": 8},
+                "nodes": [
+                    {"id": "src", "subagent": "worker", "outputs": [{"name": "items", "type": "json"}]},
+                    {
+                        "id": "fan",
+                        "subagent": {"prompt": "Expand item {items}."},
+                        "depends_on": ["src"],
+                        "inputs": [{"name": "items", "type": "json", "from": "src.items"}],
+                        "foreach": {"over": "items", "max": 3},
+                        "outputs": [{"name": "result", "type": "json"}],
+                    },
+                    {
+                        "id": "dep",
+                        "subagent": {"prompt": "Report {result}."},
+                        "depends_on": ["fan"],
+                        "inputs": [{"name": "result", "type": "json", "from": "fan.result"}],
+                    },
+                ],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(self.all_events_of(result, "output_capture_failed"), [])
+        # Every instance's value reaches the dependent, in instance order.
+        dep_prompt = self.host.spawn_calls("dep")[0]["prompt"]
+        self.assertIn(f"Report {json.dumps([1, 2, 3])}.", dep_prompt)
+
+    @async_test
+    async def test_foreach_json_output_binds_a_one_element_list(self) -> None:
+        # A foreach port binds a LIST whatever the instance count: a
+        # one-item fan binds a one-element list, not the bare value, so a
+        # reader never has to branch on how many items the fan matched.
+        self.host.outcomes["src"] = {
+            "status": "done",
+            "answer": '```json\n{"items": ["a"]}\n```',
+        }
+        self.host.child_outcomes["child-2"] = {
+            "status": "done",
+            "answer": '```json\n{"result": 1}\n```',
+        }
+        self.store_factory(
+            {
+                "run": {"failure_policy": "continue", "max_parallel": 8},
+                "nodes": [
+                    {"id": "src", "subagent": "worker", "outputs": [{"name": "items", "type": "json"}]},
+                    {
+                        "id": "fan",
+                        "subagent": {"prompt": "Expand item {items}."},
+                        "depends_on": ["src"],
+                        "inputs": [{"name": "items", "type": "json", "from": "src.items"}],
+                        "foreach": {"over": "items", "max": 3},
+                        "outputs": [{"name": "result", "type": "json"}],
+                    },
+                    {
+                        "id": "dep",
+                        "subagent": {"prompt": "Report {result}."},
+                        "depends_on": ["fan"],
+                        "inputs": [{"name": "result", "type": "json", "from": "fan.result"}],
+                    },
+                ],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(self.all_events_of(result, "output_capture_failed"), [])
+        dep_prompt = self.host.spawn_calls("dep")[0]["prompt"]
+        self.assertIn(f"Report {json.dumps([1])}.", dep_prompt)
+
+    @async_test
     async def test_foreach_zero_items_marks_node_done(self) -> None:
         self.host.outcomes["src"] = {"status": "done", "answer": '{"items": []}'}
         self.store_factory(

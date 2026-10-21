@@ -3098,17 +3098,52 @@ class FactoryExecutor:
         (guard or input binding) fails deterministically instead of
         re-parsing. A capture cut at the binding cap names the size and the
         cap in the parse error.
+
+        A foreach entry's json port binds the LIST of its instances'
+        values, one value per instance. Every instance answers in its own
+        document, so the entry's joined answer is one document carrying
+        several fenced blocks: parsing that binds ONE instance's value
+        (the last block that carries the port) and drops the others
+        without an error. Each instance is parsed on its own instead, and
+        the values are collected in instance order.
         """
         outputs: dict[str, Any] = {}
         errors: dict[str, str] = {}
         truncated_at = (
             len(entry.answer) if entry.answer is not None and len(entry.answer) >= ANSWER_BINDING_CAP else None
         )
+        foreach = state.spec.get("foreach")
         for out in state.spec.get("outputs") or []:
             name, port_type = out.get("name"), out.get("type")
             if port_type == "text":
                 if entry.answer is not None:
                     outputs[name] = entry.answer
+                continue
+            if foreach is not None:
+                values: list[Any] = []
+                failure: str | None = None
+                for instance in entry.instances:
+                    if instance.status != "done":
+                        continue
+                    if instance.answer is None:
+                        failure = (
+                            f"foreach instance {instance.index} captured no answer for output {name!r}"
+                        )
+                        break
+                    instance_truncated_at = (
+                        len(instance.answer) if len(instance.answer) >= ANSWER_BINDING_CAP else None
+                    )
+                    parsed, error = _parse_json_output(
+                        instance.answer, name, truncated_at=instance_truncated_at
+                    )
+                    if error is not None:
+                        failure = error
+                        break
+                    values.append(parsed)
+                if failure is None:
+                    outputs[name] = values
+                else:
+                    errors[name] = failure
                 continue
             if entry.answer is None:
                 continue
@@ -5063,7 +5098,11 @@ the cap, fails to capture, and fails the producing state through its
 - **foreach**: `{"over": "<input>", "max": 1..256}` expands one entry into
   one child per item of the named `json` input (clamped at `max`), each
   child rendered with its item bound as that input; an empty list settles
-  the entry with no children.
+  the entry with no children. A foreach state's `json` output binds the
+  LIST of its instances' values, one value per instance — the instances
+  answer in separate documents, so the port never binds one instance's
+  value alone — and its `text` output keeps the instances' answers
+  joined.
 - **Residents**: `"lifecycle": "resident"` states declare no outputs, no
   foreach, no retries, and no outgoing transitions, nothing reads from
   them, and their instance stays alive under the parent session after the
