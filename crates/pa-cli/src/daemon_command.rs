@@ -343,6 +343,10 @@ struct ParsedSendArgs {
     target_active_session_id: String,
     from_active_session_id: Option<String>,
     message: String,
+    /// The delivery lane the worker picks (`WorkerDeliverMessage`'s
+    /// `deliveryMode`): `None` steers (the default for a message to a busy
+    /// agent), `"follow_up"` queues the message after the current turn.
+    delivery_mode: Option<&'static str>,
 }
 
 fn run_send(client: &mut DaemonClient, args: &[String], json: bool) -> Result<()> {
@@ -353,7 +357,7 @@ fn run_send(client: &mut DaemonClient, args: &[String], json: bool) -> Result<()
         message: parsed.message,
         from_active_session_id: parsed.from_active_session_id,
         agent_origin: None,
-        delivery_mode: None,
+        delivery_mode: parsed.delivery_mode.map(Value::from),
         rest: serde_json::Map::new(),
     })?;
     let data = require_success(response)?.unwrap_or(Value::Null);
@@ -398,6 +402,10 @@ fn parse_send_args(args: &[String]) -> Result<ParsedSendArgs> {
     let mut target_active_session_id: Option<String> = None;
     let mut explicit_message: Option<String> = None;
     let mut message_parts: Vec<String> = Vec::new();
+    // The delivery lane (TS `send --steer` / `--follow-up`): the daemon
+    // forwards it to the worker, which picks the steering or the
+    // follow-up queue. A plain send steers.
+    let mut delivery_mode: Option<&'static str> = None;
     let mut parse_options = true;
     let mut index = 0;
     while index < args.len() {
@@ -427,6 +435,20 @@ fn parse_send_args(args: &[String]) -> Result<ParsedSendArgs> {
             parse_options = false;
             continue;
         }
+        if parse_options && arg == "--steer" {
+            if delivery_mode.is_some() {
+                bail!("send accepts either --steer or --follow-up, not both");
+            }
+            delivery_mode = Some("steer");
+            continue;
+        }
+        if parse_options && arg == "--follow-up" {
+            if delivery_mode.is_some() {
+                bail!("send accepts either --steer or --follow-up, not both");
+            }
+            delivery_mode = Some("follow_up");
+            continue;
+        }
         if parse_options && arg.starts_with("--") {
             bail!("Unknown option for send: {arg} (use -- before message text starting with --)");
         }
@@ -450,6 +472,7 @@ fn parse_send_args(args: &[String]) -> Result<ParsedSendArgs> {
         target_active_session_id: target_active_session_id.expect("checked above"),
         from_active_session_id,
         message,
+        delivery_mode,
     })
 }
 
@@ -677,6 +700,30 @@ mod tests {
         assert_eq!(send.positionals, args(&["target", "--", "hi", "there"]));
         let list = parse_daemon_command("list", &args(&["--", "-a"])).unwrap();
         assert_eq!(list.positionals, args(&["-a"]));
+    }
+
+    #[test]
+    fn send_accepts_the_delivery_mode_flags_the_help_advertises() {
+        // The send help lists --steer and --follow-up, but the parser
+        // rejected both. The worker already picks the lane from the
+        // forwarded delivery mode, so the flags only have to reach the
+        // command.
+        let steer = parse_send_args(&args(&["--steer", "target", "hi"])).unwrap();
+        assert_eq!(steer.delivery_mode, Some("steer"));
+        assert_eq!(steer.target_active_session_id, "target");
+        assert_eq!(steer.message, "hi");
+
+        let follow_up = parse_send_args(&args(&["--follow-up", "target", "hi"])).unwrap();
+        assert_eq!(follow_up.delivery_mode, Some("follow_up"));
+        assert_eq!(follow_up.message, "hi");
+
+        // A plain send steers: the worker defaults to the steering lane.
+        let plain = parse_send_args(&args(&["target", "hi"])).unwrap();
+        assert_eq!(plain.delivery_mode, None);
+
+        // The two modes are exclusive.
+        let both = parse_send_args(&args(&["--steer", "--follow-up", "target", "hi"]));
+        assert!(both.is_err());
     }
 
     #[test]
