@@ -624,63 +624,29 @@ fn enter() -> crossterm::event::KeyEvent {
     )
 }
 
-/// A bare `/skill:<name>` submission never reaches the daemon: the guard restores the draft and
-/// the notice names the fix.
+/// A bare `/skill:<name>` submission passes through to the daemon: the expanded protocol lands with
+/// no task text, and the daemon's admission seam asks the model what the user wants (TS sends the
+/// bare form through as well — the client never bounces it).
 #[test]
-fn a_bare_skill_submit_shows_the_notice_and_never_sends() {
+fn a_bare_skill_submit_sends_through_without_a_notice() {
     let (frames, prompts) = run_plan_with_prompts(vec![
         HeadlessStep::WaitMs(300),
         HeadlessStep::Type("/skill:web".to_string()),
         HeadlessStep::SettleIdle,
         HeadlessStep::Key(enter()),
-        HeadlessStep::Key(enter()),
-        HeadlessStep::WaitMs(200),
-    ]);
-    assert!(
-        prompts.is_empty(),
-        "the bare submission never reached the daemon: {prompts:?}"
-    );
-    let all = frames.join("\n");
-    assert!(
-        all.contains("add your request after the skill"),
-        "the notice renders: {all}"
-    );
-    assert!(
-        all.contains("make a release of PR #2731"),
-        "the notice carries the worked example: {all}"
-    );
-    let last = frames.last().expect("a frame was captured");
-    assert!(
-        last.contains("skill:web-search"),
-        "the draft restores into the editor: {last}"
-    );
-}
-
-/// The restored draft keeps the argument position: the trailing space survives, so typed keystrokes
-/// become args instead of gluing onto the command name.
-#[test]
-fn the_bare_skill_guard_restores_into_the_argument_position() {
-    let (frames, prompts) = run_plan_with_prompts(vec![
-        HeadlessStep::WaitMs(300),
-        HeadlessStep::Type("/skill:web".to_string()),
-        HeadlessStep::SettleIdle,
-        HeadlessStep::Key(enter()),
-        HeadlessStep::Key(enter()),
-        HeadlessStep::WaitMs(150),
-        HeadlessStep::Type("find rust tuis".to_string()),
         HeadlessStep::Key(enter()),
         HeadlessStep::WaitMs(300),
     ]);
     assert_eq!(prompts.len(), 1, "one prompt dispatched: {prompts:?}");
     assert_eq!(
         prompts[0].get("message").and_then(Value::as_str),
-        Some("/skill:web-search find rust tuis"),
-        "the typed request became the command's args: {prompts:?}"
+        Some("/skill:web-search"),
+        "the bare command travels as typed: {prompts:?}"
     );
     let all = frames.join("\n");
     assert!(
-        all.contains("add your request after the skill"),
-        "the notice rendered before the recovery: {all}"
+        !all.contains("add your request after the skill"),
+        "no client-side bounce notice renders: {all}"
     );
 }
 

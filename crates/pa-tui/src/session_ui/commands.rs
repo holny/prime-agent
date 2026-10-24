@@ -21,19 +21,6 @@ impl SessionUi {
         let (name, args) = pa_types::slash_commands::parse_slash_command(text)
             .unwrap_or_else(|| (String::new(), String::new()));
 
-        // A bare `/skill:<name>` never sends: the daemon's admission seam would hand the model the
-        // expanded protocol as its only user message with no task attached.
-        if name.starts_with("skill:") && args.trim().is_empty() {
-            // The draft restores into the argument position: the next keystrokes
-            // become the request.
-            view.editor.set_text(&format!("{text} "));
-            self.note(
-                "add your request after the skill, e.g. /skill:prime-agent-release make a release of PR #2731",
-                view,
-            );
-            return Ok(());
-        }
-
         // Client-local commands this build implements (not TS builtins).
         match name.as_str() {
             "help" => {
