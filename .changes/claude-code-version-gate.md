@@ -1,0 +1,1 @@
+- Bumped the mimicked Claude Code client version to 2.1.290, so Anthropic-subscription OAuth requests can reach models gated on the newer client (claude-fable-5-2).
