@@ -457,6 +457,12 @@ impl Worker {
             .join(pa_core::cron::store::SESSION_SCHEDULED_JOBS_FILENAME)
             .is_file()
         {
+            // The artifact dir went with the session; a bind-time
+            // registration for it is dead weight in the register-only
+            // map — drop it (#3864).
+            self.scheduled
+                .store()
+                .unregister_session_artifact(session_id);
             return;
         }
         self.scheduled

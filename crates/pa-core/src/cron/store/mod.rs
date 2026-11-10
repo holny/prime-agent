@@ -17,6 +17,7 @@ mod session_artifacts;
 mod state;
 
 pub use session_artifacts::read_scheduled_jobs_artifact;
+use state::CachedJobsState;
 
 pub const SESSION_SCHEDULED_JOBS_FILENAME: &str = "scheduled-jobs.json";
 
@@ -52,6 +53,19 @@ pub struct AgentCronJobStore {
     /// Interior-mutex so an `Arc`-shared store can register a session's
     /// artifact partition as sessions bind.
     session_artifact_files: std::sync::Mutex<HashMap<String, PathBuf>>,
+    /// Parsed artifact states keyed by each file's stat (mtime, len), so a
+    /// read costs one `stat` instead of an open+read+parse — TS 0.9.8's
+    /// store cached per file keyed by stat and the port dropped it,
+    /// re-parsing every registered partition on every `list()` (#3864).
+    /// A `None` stamp caches "file absent".
+    state_cache: std::sync::Mutex<HashMap<PathBuf, CachedJobsState>>,
+    /// The settled-child release gate's answer set (`active_session_id` ->
+    /// active-or-paused job count), `None` = stale and due a refresh from
+    /// the stat-keyed cache (#3864). Writers mark it stale instead of
+    /// mutating it: a missed staleness mark fails safe (the gate keeps
+    /// blocking passivation), while a missed increment would wrongly
+    /// release a kernel under a live job.
+    gate_index: std::sync::Mutex<Option<HashMap<String, usize>>>,
     heartbeat_change_listeners: Vec<Box<dyn Fn() + Send + Sync>>,
 }
 
@@ -82,6 +96,8 @@ impl AgentCronJobStore {
             file_path: Some(file_path),
             session_artifact_mode: false,
             session_artifact_files: std::sync::Mutex::new(HashMap::new()),
+            state_cache: std::sync::Mutex::new(HashMap::new()),
+            gate_index: std::sync::Mutex::new(None),
             heartbeat_change_listeners: Vec::new(),
         }
     }
@@ -93,6 +109,8 @@ impl AgentCronJobStore {
             file_path: None,
             session_artifact_mode: true,
             session_artifact_files: std::sync::Mutex::new(HashMap::new()),
+            state_cache: std::sync::Mutex::new(HashMap::new()),
+            gate_index: std::sync::Mutex::new(None),
             heartbeat_change_listeners: Vec::new(),
         }
     }

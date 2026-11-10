@@ -590,13 +590,7 @@ impl Worker {
                             .active_session_id
                             .clone()
                     };
-                    jobs_store.list().into_iter().any(|job| {
-                        job.active_session_id == active_session_id
-                            && matches!(
-                                job.status,
-                                pa_core::cron::JobStatus::Active | pa_core::cron::JobStatus::Paused
-                            )
-                    })
+                    jobs_store.has_active_or_paused_job_for(&active_session_id)
                 }));
                 // The live compaction summary-delta sink: every summarizer
                 // text delta reaches clients as one ephemeral frame (never

@@ -17,7 +17,70 @@ use crate::cron::{
 
 const LOCK_STALE_MS: u64 = 30_000;
 
+/// One stat-keyed cache entry: the parsed state as of `(mtime, len)`.
+/// `None` stamps "file absent at last stat".
+#[derive(Debug, Clone)]
+pub(crate) struct CachedJobsState {
+    stamp: Option<(std::time::SystemTime, u64)>,
+    state: std::sync::Arc<CronJobsState>,
+}
+
+/// The file's identity as a cache key: `(mtime, len)`, or `None` when the
+/// file does not exist. Any external write changes at least one of the two
+/// (a same-length rewrite moves mtime), so a stat miss is the invalidation.
+fn file_stamp(path: &Path) -> Option<(std::time::SystemTime, u64)> {
+    std::fs::metadata(path).ok().map(|meta| {
+        (
+            meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+            meta.len(),
+        )
+    })
+}
+
+/// Read one artifact's state through the stat-keyed cache: a hit costs one
+/// `stat`, a miss re-reads and re-parses the file.
+pub(crate) fn cached_jobs_state(
+    path: &Path,
+    cache: &mut HashMap<PathBuf, CachedJobsState>,
+) -> CachedJobsState {
+    let stamp = file_stamp(path);
+    if let Some(hit) = cache.get(path) {
+        if hit.stamp == stamp {
+            return hit.clone();
+        }
+    }
+    let entry = CachedJobsState {
+        stamp,
+        state: std::sync::Arc::new(read_jobs_state(path)),
+    };
+    cache.insert(path.to_path_buf(), entry.clone());
+    entry
+}
+
 impl AgentCronJobStore {
+    /// Drop one path's cached state and mark the gate index stale. Locks
+    /// are taken one at a time (never nested) so the read paths' ordering
+    /// (`state_cache` while holding nothing else) cannot deadlock.
+    pub(crate) fn invalidate_cached_state(&self, path: &Path) {
+        self.state_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(path);
+        *self
+            .gate_index
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    /// Mark the gate index stale without touching the state cache (a
+    /// partition set change alone changes the answer set).
+    pub(crate) fn mark_gate_index_stale(&self) {
+        *self
+            .gate_index
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
     pub(crate) fn read_jobs(&self) -> Vec<AgentCronJob> {
         self.read_states()
             .into_iter()
@@ -27,11 +90,21 @@ impl AgentCronJobStore {
 
     pub(crate) fn read_states(&self) -> Vec<CronJobsState> {
         if self.session_artifact_mode {
-            let files = self
+            let files: Vec<PathBuf> = self
                 .session_artifact_files
                 .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .values()
+                .cloned()
+                .collect();
+            let mut cache = self
+                .state_cache
+                .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            return files.values().map(|path| read_jobs_state(path)).collect();
+            return files
+                .iter()
+                .map(|path| cached_jobs_state(path, &mut cache).state.as_ref().clone())
+                .collect();
         }
         vec![read_jobs_state(&self.require_file_path())]
     }
@@ -60,6 +133,7 @@ impl AgentCronJobStore {
                 dispatches.extend(mutator(&mut state));
                 if serde_json::to_string(&state).unwrap_or_default() != before {
                     write_jobs_state(path, &state)?;
+                    self.invalidate_cached_state(path);
                     changed = true;
                 }
             }
@@ -82,6 +156,7 @@ impl AgentCronJobStore {
                 write_jobs_file(&path, jobs, true)
             })
             .ok_or_else(|| anyhow::anyhow!("cron jobs state lock not acquired; skipped"))??;
+            self.invalidate_cached_state(&path);
         }
         if Self::heartbeat_catalog_signature(&self.read_jobs()) != previous_heartbeats {
             self.notify_heartbeat_change();

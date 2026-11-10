@@ -1,0 +1,1 @@
+- Long-lived workers no longer slow down as RLM descendants accumulate: reads of per-session scheduled-jobs partitions cost one stat (a stat-keyed parse cache, as in 0.9.8), the settled-child release gate answers from an in-memory index instead of re-reading every registered partition on each park, and deleting a session drops its dead partition registration.

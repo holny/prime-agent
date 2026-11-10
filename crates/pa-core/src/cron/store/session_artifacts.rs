@@ -31,6 +31,34 @@ impl AgentCronJobStore {
             return false;
         }
         files.insert(session_id.to_string(), path);
+        // A fresh partition (a re-bind can carry existing jobs on disk)
+        // joins the answer set: the next gate refresh must read it.
+        self.mark_gate_index_stale();
+        true
+    }
+
+    /// Drop one session's artifact registration — the #3864 fix for the
+    /// register-only map. Safe when the session is gone for good (the
+    /// deleted-session path calls it once the partition file went away
+    /// with the session); a later `register_session_artifact` re-binds
+    /// idempotently. Returns whether a registration existed.
+    pub fn unregister_session_artifact(&self, session_id: &str) -> bool {
+        if !self.session_artifact_mode {
+            return false;
+        }
+        let Some(path) = self
+            .session_artifact_files
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(session_id)
+        else {
+            return false;
+        };
+        self.state_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&path);
+        self.mark_gate_index_stale();
         true
     }
 
@@ -66,6 +94,7 @@ impl AgentCronJobStore {
                 if !state.dispatches.is_empty() {
                     recover_interrupted_in_state(&mut state, now, &mut recovered, None);
                     write_jobs_state(&path, &state)?;
+                    self.invalidate_cached_state(&path);
                 }
                 Ok(recovered)
             },
@@ -150,6 +179,7 @@ impl AgentCronJobStore {
                     != serde_json::to_string(&next_state).unwrap_or_default()
                 {
                     write_jobs_state(path, &next_state)?;
+                    self.invalidate_cached_state(path);
                 }
             }
             Ok(())
@@ -169,6 +199,98 @@ pub fn read_scheduled_jobs_artifact(path: &Path) -> Vec<AgentCronJob> {
 mod tests {
     use super::*;
     use crate::cron::store::{input, CancelJobsFilter, SessionBinding};
+
+    /// The release gate's answer set (#3864): create populates it, a
+    /// rebind moves it to the new active session id, cancel empties it.
+    #[test]
+    fn the_release_gate_index_tracks_create_rebind_and_cancel() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = AgentCronJobStore::for_session_artifacts();
+        let artifacts = dir.path().join("a");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        store.register_session_artifact("session-1", &artifacts);
+        let now = 1_700_000_000_000;
+        store.create(&input("gate job", "every 10m", now)).unwrap();
+        // The input's active session is "live-1".
+        assert!(store.has_active_or_paused_job_for("live-1"));
+        assert!(!store.has_active_or_paused_job_for("session-1"));
+        // A rebind moves the job to the new active session id even though
+        // the partition stays keyed by the original session id.
+        store
+            .rebind_session_jobs(&SessionBinding {
+                active_session_id: "live-2".to_string(),
+                session_id: "session-1".to_string(),
+                session_file: "/w/session.jsonl".to_string(),
+                cwd: "/w".to_string(),
+            })
+            .unwrap();
+        assert!(!store.has_active_or_paused_job_for("live-1"));
+        assert!(store.has_active_or_paused_job_for("live-2"));
+        // A cancelled job no longer blocks passivation.
+        store
+            .cancel_jobs_for_session(
+                &CancelJobsFilter {
+                    session_file: Some("/w/session.jsonl".to_string()),
+                    ..Default::default()
+                },
+                now + 1,
+            )
+            .unwrap();
+        assert!(!store.has_active_or_paused_job_for("live-2"));
+    }
+
+    /// The stat-keyed cache (#3864): a warm read populates it, and an
+    /// external partition edit (mtime and len move) is still visible.
+    #[test]
+    fn external_partition_edits_invalidate_the_stat_cache() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = AgentCronJobStore::for_session_artifacts();
+        let artifacts = dir.path().join("a");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        store.register_session_artifact("session-1", &artifacts);
+        let now = 1_700_000_000_000;
+        store.create(&input("cache job", "every 10m", now)).unwrap();
+        assert_eq!(store.list().len(), 1);
+        let path = artifacts.join(SESSION_SCHEDULED_JOBS_FILENAME);
+        {
+            let cache = store
+                .state_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(
+                cache.contains_key(&path),
+                "a read through the partition must warm the stat cache"
+            );
+        }
+        std::fs::write(&path, "{\"jobs\":[],\"dispatches\":[]}").unwrap();
+        assert!(
+            store.list().is_empty(),
+            "an external edit must invalidate the cached parse"
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert!(store.list().is_empty());
+    }
+
+    /// Unregistration (#3864): drops the partition and its cached parse,
+    /// is idempotent, and a later bind re-registers and works.
+    #[test]
+    fn unregister_drops_the_partition_and_a_later_bind_rebinds() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = AgentCronJobStore::for_session_artifacts();
+        let artifacts = dir.path().join("a");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        store.register_session_artifact("session-1", &artifacts);
+        assert!(store.unregister_session_artifact("session-1"));
+        assert!(!store.unregister_session_artifact("session-1"));
+        assert!(store.session_artifacts().is_empty());
+        assert!(!store.has_active_or_paused_job_for("live-1"));
+        assert!(store.register_session_artifact("session-1", &artifacts));
+        let now = 1_700_000_000_000;
+        store
+            .create(&input("back again", "every 10m", now))
+            .unwrap();
+        assert!(store.has_active_or_paused_job_for("live-1"));
+    }
 
     #[test]
     fn session_artifact_partitioning() {

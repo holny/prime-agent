@@ -26,6 +26,37 @@ impl AgentCronJobStore {
         jobs
     }
 
+    /// The settled-child release gate's question (TS #2483's
+    /// `canPassivateSettledSession` `hasRegisteredCronJob`): does this
+    /// active session still own an active or paused scheduled job? A
+    /// cron or heartbeat run must not lose its kernel. Served from the
+    /// in-memory gate index, refreshed through the stat-keyed state
+    /// cache, so a park-time probe costs no file reads even when the
+    /// store spans thousands of registered partitions (#3864).
+    pub fn has_active_or_paused_job_for(&self, active_session_id: &str) -> bool {
+        {
+            let guard = self
+                .gate_index
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(index) = guard.as_ref() {
+                return index.get(active_session_id).is_some_and(|count| *count > 0);
+            }
+        }
+        let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for job in self.read_jobs() {
+            if matches!(job.status, JobStatus::Active | JobStatus::Paused) {
+                *index.entry(job.active_session_id.clone()).or_insert(0) += 1;
+            }
+        }
+        let answer = index.get(active_session_id).is_some_and(|count| *count > 0);
+        *self
+            .gate_index
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(index);
+        answer
+    }
+
     /// Create a cron job from the input schedule and prompt.
     ///
     /// # Errors
