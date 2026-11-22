@@ -30,6 +30,7 @@ pub use crate::autonomous::AUTONOMOUS_STATUS_CUSTOM_TYPE;
 /// Inputs the host runtime supplies to one execution.
 pub struct SessionCommandParams<'a> {
     pub model: &'a pa_types::ai::Model,
+    pub compaction_abort: Option<&'a pa_agent::abort::AbortSignal>,
     /// Resolved API key (None falls back to provider resolution).
     pub api_key: Option<String>,
     pub autonomous: &'a mut AutonomousRuntimeState,
@@ -250,11 +251,18 @@ async fn execute_compact(
     execution: &mut SessionCommandExecution,
 ) -> Result<(), String> {
     let instructions = (!command.args.is_empty()).then_some(command.args.as_str());
-    let outcome = engine
-        .session
-        .compact(instructions, params.model, params.api_key.clone(), None)
-        .await
-        .map_err(|error| format!("{error:#}"))?;
+    let compact = engine.session.compact(
+        instructions, params.model, params.api_key.clone(), params.compaction_abort,
+    );
+    let outcome = if let Some(signal) = params.compaction_abort {
+        tokio::select! {
+            biased;
+            () = signal.aborted() => return Err("Request was aborted".to_string()),
+            result = compact => result,
+        }
+    } else {
+        compact.await
+    }.map_err(|error| format!("{error:#}"))?;
     match outcome {
         CompactOutcome::Skipped(message) => {
             execution.compaction_skipped = Some(message);
@@ -526,6 +534,7 @@ mod tests {
         let mut execution = SessionCommandExecution::default();
         execute_autonomous(
             &mut SessionCommandParams {
+                compaction_abort: None,
                 model: &scripted_model(),
                 api_key: None,
                 autonomous: &mut autonomous,

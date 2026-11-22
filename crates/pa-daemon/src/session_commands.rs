@@ -24,6 +24,7 @@ pub(crate) fn run_session_command(
     emit: &mut dyn FnMut(EngineEvent) -> bool,
 ) -> Option<SessionCommandExecution> {
     let is_compact = command.name == "compact";
+    let controller = is_compact.then(|| std::sync::Arc::new(pa_agent::abort::AbortController::new()));
     // The durable echo row goes out before execution (TS records the attempted command
     // before the queue runs it).
     if !emit(EngineEvent::CustomMessage(custom_message_value(
@@ -32,14 +33,24 @@ pub(crate) fn run_session_command(
         return None;
     }
     if is_compact {
+        *engine.auto_compaction_abort.lock().expect("compaction abort lock") = controller.clone();
         let custom_instructions = compact_custom_instructions(command);
         let start =
             crate::compaction::compaction_start_event("manual", custom_instructions.as_deref());
         if !emit(EngineEvent::CompactionStart { event: start }) {
+            if let Some(controller) = &controller {
+                engine.clear_auto_compaction_abort(controller);
+            }
             return None;
         }
     }
-    let mut execution = match engine.execute_session_command(command, images) {
+    let signal = controller.as_ref().map(|controller| controller.signal());
+    let result = engine.execute_session_command(command, images, signal.as_ref());
+    let aborted = signal.as_ref().is_some_and(pa_agent::abort::AbortSignal::is_aborted);
+    if let Some(controller) = &controller {
+        engine.clear_auto_compaction_abort(controller);
+    }
+    let mut execution = match result {
         Ok(execution) => execution,
         // Pre-execution failures (model resolution, session build) still record the
         // attempted command as a failure result row (the echo row above already went out).
@@ -53,7 +64,7 @@ pub(crate) fn run_session_command(
                 error: Some(error),
                 pending_refinement: None,
             };
-            if !emit_compact_end(command, &execution, emit) {
+            if !emit_compact_end(command, &execution, aborted, emit) {
                 return None;
             }
             for message in &execution.messages {
@@ -81,7 +92,7 @@ pub(crate) fn run_session_command(
     }
     // The settled `compaction_end` precedes any failure result row (TS `compact()` emits
     // the event before the queued-command catch arm appends `Command failed: ...`).
-    if is_compact && !emit_compact_end(command, &execution, emit) {
+    if is_compact && !emit_compact_end(command, &execution, aborted, emit) {
         return None;
     }
     // `/autonomous` (either flip): the previous run's owed continuations
@@ -111,10 +122,15 @@ fn compact_custom_instructions(command: &SessionSlashCommand) -> Option<String> 
 fn emit_compact_end(
     command: &SessionSlashCommand,
     execution: &SessionCommandExecution,
+    aborted: bool,
     emit: &mut dyn FnMut(EngineEvent) -> bool,
 ) -> bool {
     let custom_instructions = compact_custom_instructions(command);
-    let (entry, event) = if let Some(compaction) = &execution.compaction {
+    let (entry, event) = if aborted && execution.compaction.is_none() {
+        (serde_json::Value::Null, crate::compaction::compaction_end_unsuccessful(
+            "manual", true, None, None, custom_instructions.as_deref(),
+        ))
+    } else if let Some(compaction) = &execution.compaction {
         let entry = serde_json::to_value(&compaction.entry).unwrap_or(serde_json::Value::Null);
         // The client-facing result is the TS `CompactionResult` wire shape (details
         // included).

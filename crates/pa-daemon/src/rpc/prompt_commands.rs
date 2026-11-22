@@ -140,6 +140,7 @@ async fn run_session_command(
         let _ops = state.session_ops.lock().await;
         let mut autonomous = state.autonomous.lock().await;
         let mut params = SessionCommandParams {
+            compaction_abort: None,
             model: &model,
             api_key: api_key.clone(),
             autonomous: &mut autonomous,
