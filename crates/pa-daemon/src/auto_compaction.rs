@@ -79,19 +79,41 @@ impl AgentSessionEngine {
             return AutoCompactionRun::NotDue;
         };
         let entries = self.runtime.block_on(engine.session.entries());
-        let context: Vec<_> = entries.iter().cloned()
+        let context: Vec<_> = entries
+            .iter()
+            .cloned()
             .filter_map(|entry| match entry {
-                pa_types::session::FileEntry::Message { message: message @ (pa_types::session::AgentMessage::User(_) | pa_types::session::AgentMessage::Assistant(_) | pa_types::session::AgentMessage::ToolResult(_)), .. } => Some(message),
+                pa_types::session::FileEntry::Message {
+                    message:
+                        message @ (pa_types::session::AgentMessage::User(_)
+                        | pa_types::session::AgentMessage::Assistant(_)
+                        | pa_types::session::AgentMessage::ToolResult(_)),
+                    ..
+                } => Some(message),
                 _ => None,
             })
             .collect();
-        if self.threshold_too_short_context.lock().expect("threshold context lock").as_ref() == Some(&context) {
+        if self
+            .threshold_too_short_context
+            .lock()
+            .expect("threshold context lock")
+            .as_ref()
+            == Some(&context)
+        {
             return AutoCompactionRun::NotDue;
         }
-        if self.threshold_too_short_context.lock().expect("threshold context lock").is_some()
-            && matches!(pa_core::session_engine::compact_session::prepare_compaction(
-                &entries, engine.session.compaction_settings().keep_recent_tokens,
-            ), Err(CompactSkip::TooShort))
+        if self
+            .threshold_too_short_context
+            .lock()
+            .expect("threshold context lock")
+            .is_some()
+            && matches!(
+                pa_core::session_engine::compact_session::prepare_compaction(
+                    &entries,
+                    engine.session.compaction_settings().keep_recent_tokens,
+                ),
+                Err(CompactSkip::TooShort)
+            )
         {
             return AutoCompactionRun::NotDue;
         }
@@ -241,14 +263,25 @@ impl AgentSessionEngine {
             Ok(Ok(CompactOutcome::Skipped(message)))
                 if message == CompactSkip::TooShort.user_message() =>
             {
-                let context = self.runtime.block_on(engine.session.entries())
+                let context = self
+                    .runtime
+                    .block_on(engine.session.entries())
                     .into_iter()
                     .filter_map(|entry| match entry {
-                        pa_types::session::FileEntry::Message { message: message @ (pa_types::session::AgentMessage::User(_) | pa_types::session::AgentMessage::Assistant(_) | pa_types::session::AgentMessage::ToolResult(_)), .. } => Some(message),
+                        pa_types::session::FileEntry::Message {
+                            message:
+                                message @ (pa_types::session::AgentMessage::User(_)
+                                | pa_types::session::AgentMessage::Assistant(_)
+                                | pa_types::session::AgentMessage::ToolResult(_)),
+                            ..
+                        } => Some(message),
                         _ => None,
                     })
                     .collect();
-                *self.threshold_too_short_context.lock().expect("threshold context lock") = Some(context);
+                *self
+                    .threshold_too_short_context
+                    .lock()
+                    .expect("threshold context lock") = Some(context);
                 AutoCompactionRun::TooShort
             }
             Ok(Ok(CompactOutcome::Skipped(_))) | Ok(Err(_)) | Err(_) => AutoCompactionRun::Ran,
