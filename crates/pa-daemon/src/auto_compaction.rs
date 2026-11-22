@@ -284,7 +284,7 @@ impl AgentSessionEngine {
                     .expect("threshold context lock") = Some(context);
                 AutoCompactionRun::TooShort
             }
-            Ok(Ok(CompactOutcome::Skipped(_))) | Ok(Err(_)) | Err(_) => AutoCompactionRun::Ran,
+            Ok(Ok(CompactOutcome::Skipped(_)) | Err(_)) | Err(_) => AutoCompactionRun::Ran,
         }
     }
 }
