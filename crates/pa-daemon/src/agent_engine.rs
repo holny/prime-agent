@@ -200,6 +200,7 @@ pub struct AgentSessionEngine {
     core_state: std::sync::Mutex<core_state::CoreSessionState>,
     threshold_yielded: Arc<std::sync::atomic::AtomicBool>,
     threshold_checks_enabled: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) threshold_too_short_context: std::sync::Mutex<Option<Vec<pa_types::session::AgentMessage>>>,
     /// The build gate: at most one `build_session` in flight; the eager build
     /// and the first demand seam meet at one build.
     pub(crate) session_build: tokio::sync::Mutex<()>,

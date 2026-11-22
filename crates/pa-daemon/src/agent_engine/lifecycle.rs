@@ -158,6 +158,7 @@ impl AgentSessionEngine {
             threshold_checks_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
                 false,
             )),
+            threshold_too_short_context: std::sync::Mutex::new(None),
             session_build: tokio::sync::Mutex::new(()),
             pending_branch: std::sync::Mutex::new(None),
             prompt_context_boundary: std::sync::Mutex::new(None),

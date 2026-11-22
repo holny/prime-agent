@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::agent_engine::AgentSessionEngine;
 use crate::engine::EngineEvent;
-use pa_core::session_engine::compact_session::CompactOutcome;
+use pa_core::session_engine::compact_session::{CompactOutcome, CompactSkip};
 use pa_core::session_engine::messages::{CompactionOutcomeKind, CompactionOutcomeReason};
 
 /// The outcome of one turn-boundary threshold check.
@@ -20,6 +20,8 @@ pub(crate) enum AutoCompactionRun {
     /// The check fired and a compaction ran (success, skip, or failure —
     /// the `compaction_start`/`compaction_end` pair went out either way).
     Ran,
+    /// A too-short transcript may become compactable after the next tool turn.
+    TooShort,
     /// A summary committed and the retained context replaced the old context.
     Compacted,
     /// The emit callback cancelled the run (an aborted turn): the caller
@@ -72,6 +74,27 @@ impl AgentSessionEngine {
         if !due {
             return AutoCompactionRun::NotDue;
         }
+        let engine = self.session.blocking_lock().clone();
+        let Some(engine) = engine else {
+            return AutoCompactionRun::NotDue;
+        };
+        let entries = self.runtime.block_on(engine.session.entries());
+        let context: Vec<_> = entries.iter().cloned()
+            .filter_map(|entry| match entry {
+                pa_types::session::FileEntry::Message { message: message @ (pa_types::session::AgentMessage::User(_) | pa_types::session::AgentMessage::Assistant(_) | pa_types::session::AgentMessage::ToolResult(_)), .. } => Some(message),
+                _ => None,
+            })
+            .collect();
+        if self.threshold_too_short_context.lock().expect("threshold context lock").as_ref() == Some(&context) {
+            return AutoCompactionRun::NotDue;
+        }
+        if self.threshold_too_short_context.lock().expect("threshold context lock").is_some()
+            && matches!(pa_core::session_engine::compact_session::prepare_compaction(
+                &entries, engine.session.compaction_settings().keep_recent_tokens,
+            ), Err(CompactSkip::TooShort))
+        {
+            return AutoCompactionRun::NotDue;
+        }
         // TS `_runAutoCompaction` emits the start event before the
         // summarizer runs, so attached surfaces see the loader.
         if !emit(EngineEvent::CompactionStart {
@@ -95,11 +118,6 @@ impl AgentSessionEngine {
         }
         let (model, api_key) = self.resolve_request_target(model);
         // The lock covers the clone only; the summarizer call below must not ride it.
-        let engine = self.session.blocking_lock().clone();
-        let Some(engine) = engine else {
-            self.clear_auto_compaction_abort(&controller);
-            return AutoCompactionRun::NotDue;
-        };
         let outcome = {
             // The abort race drops the summarizer request in flight; the
             // signal also lands the pre-commit check inside the compaction.
@@ -218,10 +236,22 @@ impl AgentSessionEngine {
                 }
             }
         }
-        if matches!(outcome, Ok(Ok(CompactOutcome::Ran(_)))) {
-            AutoCompactionRun::Compacted
-        } else {
-            AutoCompactionRun::Ran
+        match outcome {
+            Ok(Ok(CompactOutcome::Ran(_))) => AutoCompactionRun::Compacted,
+            Ok(Ok(CompactOutcome::Skipped(message)))
+                if message == CompactSkip::TooShort.user_message() =>
+            {
+                let context = self.runtime.block_on(engine.session.entries())
+                    .into_iter()
+                    .filter_map(|entry| match entry {
+                        pa_types::session::FileEntry::Message { message: message @ (pa_types::session::AgentMessage::User(_) | pa_types::session::AgentMessage::Assistant(_) | pa_types::session::AgentMessage::ToolResult(_)), .. } => Some(message),
+                        _ => None,
+                    })
+                    .collect();
+                *self.threshold_too_short_context.lock().expect("threshold context lock") = Some(context);
+                AutoCompactionRun::TooShort
+            }
+            Ok(Ok(CompactOutcome::Skipped(_))) | Ok(Err(_)) | Err(_) => AutoCompactionRun::Ran,
         }
     }
 }

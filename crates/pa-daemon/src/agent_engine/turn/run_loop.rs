@@ -33,6 +33,7 @@ impl AgentSessionEngine {
             .store(false, std::sync::atomic::Ordering::SeqCst);
         self.threshold_checks_enabled
             .store(true, std::sync::atomic::Ordering::SeqCst);
+        *self.threshold_too_short_context.lock().expect("threshold context lock") = None;
         // Whether a loop-boundary frame already passed in this item: the
         // worker's run-opening frames are the first run's, so the engine
         // forwards the later runs' opening frames.
