@@ -1292,3 +1292,138 @@ fn low_custom_percentage_compacts_real_history_once_and_then_makes_progress() {
         }
     );
 }
+
+#[test]
+fn too_short_mid_run_compaction_retries_after_history_grows() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tool_turn = || {
+        json!({
+            "content": [
+                {"type":"text", "text":"x".repeat(80_000)},
+                {"type":"toolCall", "id":"synthetic-call", "name":"synthetic_missing_tool", "arguments":{}}
+            ]
+        })
+    };
+    let (engine, dir) = faux_engine_with_settings(
+        &json!({
+            "responses": [
+                {"text":"seed reply"},
+                tool_turn(),
+                tool_turn(),
+                {"text":"history summary"},
+                {"text":"prefix summary"},
+                {"text":"task finished"},
+                {"text":"follow-up history summary"},
+                {"text":"follow-up prefix summary"}
+            ]
+        }),
+        128_000 - FAUX_REQUEST_BUDGET - 20_000,
+    );
+    // The first oversized assistant/tool turn crosses the model threshold,
+    // while the 30k retained tail keeps that turn's transcript shorter than
+    // the cut budget. A second tool turn grows the same run past the cut.
+    std::fs::write(
+        dir.path().join("agent/settings.json"),
+        json!({"compaction": {
+            "enabled": true,
+            // Keep the effective combined-limit trigger at 20k tokens:
+            // the transcript-only 30k cut budget must not raise it.
+            "reserveTokens": 128_000 - FAUX_REQUEST_BUDGET - 20_000,
+            "keepRecentTokens": 30_000
+        }})
+        .to_string(),
+    )
+    .unwrap();
+
+    let mut events = Vec::new();
+    admit(&engine, "seed".into(), &mut events);
+    events.clear();
+    admit(&engine, "continue task".into(), &mut events);
+
+    let too_short_message =
+        "Auto-compaction skipped: Session is too short to compact — try again once it grows";
+    let diagnostics: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            EngineEvent::CompactionStart { event } => Some(format!("start:{}", event["reason"])),
+            EngineEvent::CustomMessage(row) if row["customType"] == "compaction_outcome" => {
+                Some(format!(
+                    "outcome:{}:{}",
+                    row["details"]["outcome"],
+                    row["content"].as_str().unwrap_or_default()
+                ))
+            }
+            EngineEvent::Compaction { event, .. } => Some(format!(
+                "end:{}:{}",
+                event["reason"],
+                event["errorMessage"].as_str().unwrap_or("committed")
+            )),
+            EngineEvent::AssistantMessage(message) => Some(format!(
+                "assistant:tokens={:?},stop={:?}",
+                message["usage"]["totalTokens"], message["stopReason"]
+            )),
+            EngineEvent::Done(_) => Some("done".to_string()),
+            _ => None,
+        })
+        .collect();
+    eprintln!("events={diagnostics:?}");
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            EngineEvent::CustomMessage(row) if row["customType"] == "compaction_outcome"
+        )),
+        "the first threshold attempt must prove it was TooShort: {diagnostics:?}"
+    );
+    let (skip_index, _) = outcome_row_and_end_event(
+        &events,
+        "threshold",
+        "skipped",
+        too_short_message,
+        "warning",
+    );
+    let compaction_starts: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| {
+            matches!(event, EngineEvent::CompactionStart { event } if event["reason"] == "threshold")
+                .then_some(index)
+        })
+        .collect();
+    assert_eq!(
+        compaction_starts.len(),
+        3,
+        "the first TooShort attempt retries after tool growth, then the later assistant growth is checked at settle: {diagnostics:?}"
+    );
+    assert!(skip_index > compaction_starts[0] && skip_index < compaction_starts[1]);
+    let assistant_indices: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| {
+            matches!(event, EngineEvent::AssistantMessage(_)).then_some(index)
+        })
+        .collect();
+    assert_eq!(
+        assistant_indices.len(),
+        3,
+        "two tool turns and the final reply"
+    );
+    assert!(
+        compaction_starts[2] > assistant_indices[2],
+        "the third check follows the final assistant's real history growth"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, EngineEvent::Compaction { event, .. } if event["result"].is_object()))
+            .count(),
+        2,
+        "the retry and the later growth-triggered attempt both commit"
+    );
+    assert_eq!(
+        assistant_texts(&events).last().map(String::as_str),
+        Some("task finished"),
+        "the same run continued past the successful compaction"
+    );
+}
