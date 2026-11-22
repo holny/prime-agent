@@ -252,7 +252,10 @@ async fn execute_compact(
 ) -> Result<(), String> {
     let instructions = (!command.args.is_empty()).then_some(command.args.as_str());
     let compact = engine.session.compact(
-        instructions, params.model, params.api_key.clone(), params.compaction_abort,
+        instructions,
+        params.model,
+        params.api_key.clone(),
+        params.compaction_abort,
     );
     let outcome = if let Some(signal) = params.compaction_abort {
         tokio::select! {
@@ -262,7 +265,8 @@ async fn execute_compact(
         }
     } else {
         compact.await
-    }.map_err(|error| format!("{error:#}"))?;
+    }
+    .map_err(|error| format!("{error:#}"))?;
     match outcome {
         CompactOutcome::Skipped(message) => {
             execution.compaction_skipped = Some(message);

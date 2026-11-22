@@ -24,7 +24,8 @@ pub(crate) fn run_session_command(
     emit: &mut dyn FnMut(EngineEvent) -> bool,
 ) -> Option<SessionCommandExecution> {
     let is_compact = command.name == "compact";
-    let controller = is_compact.then(|| std::sync::Arc::new(pa_agent::abort::AbortController::new()));
+    let controller =
+        is_compact.then(|| std::sync::Arc::new(pa_agent::abort::AbortController::new()));
     // The durable echo row goes out before execution (TS records the attempted command
     // before the queue runs it).
     if !emit(EngineEvent::CustomMessage(custom_message_value(
@@ -33,7 +34,10 @@ pub(crate) fn run_session_command(
         return None;
     }
     if is_compact {
-        *engine.auto_compaction_abort.lock().expect("compaction abort lock") = controller.clone();
+        *engine
+            .auto_compaction_abort
+            .lock()
+            .expect("compaction abort lock") = controller.clone();
         let custom_instructions = compact_custom_instructions(command);
         let start =
             crate::compaction::compaction_start_event("manual", custom_instructions.as_deref());
@@ -46,7 +50,9 @@ pub(crate) fn run_session_command(
     }
     let signal = controller.as_ref().map(|controller| controller.signal());
     let result = engine.execute_session_command(command, images, signal.as_ref());
-    let aborted = signal.as_ref().is_some_and(pa_agent::abort::AbortSignal::is_aborted);
+    let aborted = signal
+        .as_ref()
+        .is_some_and(pa_agent::abort::AbortSignal::is_aborted);
     if let Some(controller) = &controller {
         engine.clear_auto_compaction_abort(controller);
     }
@@ -127,9 +133,16 @@ fn emit_compact_end(
 ) -> bool {
     let custom_instructions = compact_custom_instructions(command);
     let (entry, event) = if aborted && execution.compaction.is_none() {
-        (serde_json::Value::Null, crate::compaction::compaction_end_unsuccessful(
-            "manual", true, None, None, custom_instructions.as_deref(),
-        ))
+        (
+            serde_json::Value::Null,
+            crate::compaction::compaction_end_unsuccessful(
+                "manual",
+                true,
+                None,
+                None,
+                custom_instructions.as_deref(),
+            ),
+        )
     } else if let Some(compaction) = &execution.compaction {
         let entry = serde_json::to_value(&compaction.entry).unwrap_or(serde_json::Value::Null);
         // The client-facing result is the TS `CompactionResult` wire shape (details
