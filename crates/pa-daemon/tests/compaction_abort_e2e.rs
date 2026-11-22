@@ -257,6 +257,58 @@ struct Client {
     events: Vec<Value>,
 }
 
+#[test]
+fn abort_cancels_prompt_compaction_from_another_client() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let mock = CompactionMock::start();
+    std::fs::write(agent_dir.join("models.json"), json!({"providers": {
+        "prime-inference": {"api": "openai-completions", "baseUrl": mock.url(),
+            "apiKey": "fixture", "models": [{"id": "mock-1", "name": "Mock 1",
+            "api": "openai-completions", "contextWindow": 128_000, "maxTokens": 4096}]}
+    }}).to_string()).expect("models");
+    std::fs::write(agent_dir.join("settings.json"), json!({"compaction": {
+        "enabled": false, "reserveTokens": 1024, "keepRecentTokens": 128
+    }}).to_string()).expect("settings");
+    let socket = dir.path().join("daemon.sock");
+    let _supervisor = spawn_supervisor(&socket, &agent_dir);
+    let mut client = Client::connect(&socket);
+    client.send_command("create", &json!({"type": "create", "config": {
+        "cwd": dir.path().to_string_lossy(), "sessionDir": session_dir.to_string_lossy(),
+        "provider": "prime-inference", "model": "mock-1"
+    }}));
+    let created = client.read_response("create");
+    assert_eq!(created["success"], true, "{created}");
+    let session_id = created["data"]["id"].as_str().expect("id").to_owned();
+    client.send_command("attach", &json!({"type": "attach", "activeSessionId": session_id}));
+    assert_eq!(client.read_response("attach")["success"], true);
+    for i in 0..3 {
+        let id = format!("seed-{i}");
+        client.send_command(&id, &json!({"type": "prompt_and_wait", "activeSessionId": session_id,
+            "message": format!("{i} {}", "example ".repeat(1000))}));
+        assert_eq!(client.read_response(&id)["success"], true);
+    }
+    let mut other = Client::connect(&socket);
+    other.send_command("attach-other", &json!({"type": "attach", "activeSessionId": session_id}));
+    assert_eq!(other.read_response("attach-other")["success"], true);
+    mock.hold_summarizer.store(true, Ordering::SeqCst);
+    client.send_command("compact", &json!({"type": "prompt_and_wait", "activeSessionId": session_id,
+        "message": "/compact"}));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !mock.requests.lock().expect("requests").iter().any(is_summarizer_request) {
+        assert!(Instant::now() < deadline, "summary request never arrived");
+        std::thread::yield_now();
+    }
+    other.send_command("abort", &json!({"type": "abort_compaction", "activeSessionId": session_id}));
+    assert_eq!(other.read_response("abort")["success"], true);
+    let end = client.wait_for_event(Duration::from_secs(8), "aborted compaction", |event| {
+        event["type"] == "compaction_end"
+    });
+    assert_eq!(end["aborted"], true, "{end}");
+}
+
 impl Client {
     fn connect(socket: &Path) -> Client {
         let stream = std::os::unix::net::UnixStream::connect(socket).expect("connect");
