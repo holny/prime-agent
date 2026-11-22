@@ -34,10 +34,11 @@ pub(crate) fn run_session_command(
         return None;
     }
     if is_compact {
-        *engine
+        (*engine
             .auto_compaction_abort
             .lock()
-            .expect("compaction abort lock") = controller.clone();
+            .expect("compaction abort lock"))
+        .clone_from(&controller);
         let custom_instructions = compact_custom_instructions(command);
         let start =
             crate::compaction::compaction_start_event("manual", custom_instructions.as_deref());
