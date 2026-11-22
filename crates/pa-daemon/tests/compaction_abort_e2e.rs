@@ -342,25 +342,24 @@ fn abort_cancels_prompt_compaction_from_another_client() {
         event["type"] == "compaction_end"
     });
     assert_eq!(end["aborted"], true, "{end}");
-    for path in std::fs::read_dir(&session_dir)
+    let persisted = std::fs::read_dir(&session_dir)
         .expect("session dir")
         .flatten()
         .map(|entry| entry.path())
-    {
-        if path
-            .extension()
-            .is_some_and(|extension| extension == "jsonl")
-        {
-            let persisted = std::fs::read_to_string(path).expect("session file");
-            assert!(
-                !persisted
-                    .lines()
-                    .any(|line| serde_json::from_str::<Value>(line)
-                        .is_ok_and(|row| row["type"] == "compaction")),
-                "aborted summary was persisted"
-            );
-        }
-    }
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "jsonl")
+        })
+        .map(|path| std::fs::read_to_string(path).expect("session file"))
+        .find(|content| content.contains("0 example example example"))
+        .expect("seeded session file exists");
+    assert!(
+        !persisted
+            .lines()
+            .any(|line| serde_json::from_str::<Value>(line)
+                .is_ok_and(|row| row["type"] == "compaction")),
+        "aborted summary was persisted"
+    );
 }
 
 impl Client {
